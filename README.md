@@ -567,6 +567,54 @@ async function fullSetup() {
 | 5 | `sdk.syncEventConnection()` | MyCashlessSDK |
 | 6 | `sdk.startSync()` | MyCashlessSDK |
 
+### Flujo 1b: Login con Fanki Token (SSO)
+
+Para integraciones con Fanki, el SDK soporta autenticación transparente usando el Bearer token del usuario ya autenticado en Fanki. El backend valida el token contra la API de Fanki, crea el usuario en MyCashless si no existe (con password aleatorio), y devuelve un JWT de MyCashless.
+
+```typescript
+import { MyCashlessSDK } from '@mycashless/react-native-sdk';
+
+async function fankiSetup(fankiToken: string) {
+  const sdk = MyCashlessSDK.getInstance();
+
+  // ── Paso 1: Inicializar SDK ──
+  await sdk.initialize(
+    { production: true, language: 'es', debug: __DEV__ },
+    { storage: new MyStorageAdapter(), database: new MyDatabaseAdapter() }
+  );
+
+  // ── Paso 2: Login con token de Fanki (sin password, sin UI de login) ──
+  const result = await sdk.authService.loginWithFankiToken(fankiToken);
+  if (!result.success) throw new Error(result.error);
+
+  // ── Paso 3: Conectar a evento ──
+  const event = await sdk.connectByCode('mi-evento');
+  if (!event) throw new Error('Evento no encontrado');
+
+  // ── Paso 4: Sincronizar conexión del usuario al evento ──
+  const connection = await sdk.syncEventConnection();
+
+  // ── Paso 5: Iniciar sincronización periódica ──
+  sdk.startSync();
+
+  // ── Listo ──
+  const balance = sdk.walletService.getBalance();
+  console.log('Balance:', balance.balance / 100);
+}
+```
+
+**Métodos involucrados:**
+
+| Paso | Método | Servicio |
+|------|--------|----------|
+| 1 | `sdk.initialize(config, adapters)` | MyCashlessSDK |
+| 2 | `authService.loginWithFankiToken(fankiToken)` | AuthService |
+| 3 | `sdk.connectByCode(code)` o `sdk.setEvent(uid)` | MyCashlessSDK |
+| 4 | `sdk.syncEventConnection()` | MyCashlessSDK |
+| 5 | `sdk.startSync()` | MyCashlessSDK |
+
+> **Nota:** El `fankiToken` es el Bearer token que Fanki usa para autenticar al usuario en su propia API. El backend de MyCashless lo valida llamando a `GET /api/frontend-api/fan` con firma HMAC, extrae el teléfono del fan, y crea o encuentra al usuario correspondiente.
+
 ### Flujo 2: Consultar Balance y Transacciones
 
 ```typescript
@@ -1886,6 +1934,7 @@ const {
 | Método | Descripción |
 |--------|-------------|
 | `login(phone, password)` | Inicia sesión con teléfono y contraseña |
+| `loginWithFankiToken(fankiToken)` | Login/registro con token de Fanki (sin password) |
 | `register(userData, firebaseToken?)` | Registra un nuevo usuario |
 | `resetPassword(phone, newPassword, firebaseToken?)` | Restablece la contraseña |
 | `logout()` | Cierra sesión y limpia datos |
