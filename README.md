@@ -587,14 +587,18 @@ async function fankiSetup(fankiToken: string) {
   const result = await sdk.authService.loginWithFankiToken(fankiToken);
   if (!result.success) throw new Error(result.error);
 
-  // ── Paso 3: Conectar a evento ──
-  const event = await sdk.connectByCode('mi-evento');
+  // ── Paso 3: Obtener eventos activos de Fanki ──
+  const events = await sdk.authService.getFankiEvents();
+  // → [{ id, uid, name, nick_name, date_start, date_end }]
+
+  // ── Paso 4: Conectar al evento (por uid o nickname) ──
+  const event = await sdk.setEvent(events[0].uid);
   if (!event) throw new Error('Evento no encontrado');
 
-  // ── Paso 4: Sincronizar conexión del usuario al evento ──
+  // ── Paso 5: Sincronizar conexión del usuario al evento ──
   const connection = await sdk.syncEventConnection();
 
-  // ── Paso 5: Iniciar sincronización periódica ──
+  // ── Paso 6: Iniciar sincronización periódica ──
   sdk.startSync();
 
   // ── Listo ──
@@ -609,11 +613,27 @@ async function fankiSetup(fankiToken: string) {
 |------|--------|----------|
 | 1 | `sdk.initialize(config, adapters)` | MyCashlessSDK |
 | 2 | `authService.loginWithFankiToken(fankiToken)` | AuthService |
-| 3 | `sdk.connectByCode(code)` o `sdk.setEvent(uid)` | MyCashlessSDK |
-| 4 | `sdk.syncEventConnection()` | MyCashlessSDK |
-| 5 | `sdk.startSync()` | MyCashlessSDK |
+| 3 | `authService.getFankiEvents()` | AuthService |
+| 4 | `sdk.setEvent(uid)` o `sdk.connectByCode(code)` | MyCashlessSDK |
+| 5 | `sdk.syncEventConnection()` | MyCashlessSDK |
+| 6 | `sdk.startSync()` | MyCashlessSDK |
 
 > **Nota:** El `fankiToken` es el Bearer token que Fanki usa para autenticar al usuario en su propia API. El backend de MyCashless lo valida llamando a `GET /api/frontend-api/fan` con firma HMAC, extrae el teléfono del fan, y crea o encuentra al usuario correspondiente.
+
+**Respuesta de `getFankiEvents()`:**
+
+```typescript
+interface FankiEvent {
+  id: number;        // ID interno del evento
+  uid: string;       // UID para usar con setEvent()
+  name: string;      // Nombre del evento
+  nick_name: string; // Código/nickname para usar con connectByCode()
+  date_start: string; // Fecha de inicio (ISO 8601)
+  date_end: string;   // Fecha de fin (ISO 8601)
+}
+```
+
+> El backend resuelve automáticamente los eventos asociados a Fanki — no necesitan conocer el `group_id` ni otros datos internos.
 
 ### Flujo 2: Consultar Balance y Transacciones
 
@@ -1935,6 +1955,7 @@ const {
 |--------|-------------|
 | `login(phone, password)` | Inicia sesión con teléfono y contraseña |
 | `loginWithFankiToken(fankiToken)` | Login/registro con token de Fanki (sin password) |
+| `getFankiEvents()` | Obtiene eventos activos asociados a la organización Fanki |
 | `register(userData, firebaseToken?)` | Registra un nuevo usuario |
 | `resetPassword(phone, newPassword, firebaseToken?)` | Restablece la contraseña |
 | `logout()` | Cierra sesión y limpia datos |
