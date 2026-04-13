@@ -821,6 +821,130 @@ async function reloadWithMercadoPago(reloadDetail: string) {
 | 4 | `paymentService.getMercadoPagoErrorMessage(detail)` | PaymentService |
 | 5 | `sdk.syncNow()` / `sdk.syncBalanceFromServer()` | MyCashlessSDK |
 
+### Flujo 4b: Recarga con Adyen
+
+El SDK maneja el contrato con el backend (`create-session`, `cancel-session`, `client-key`, `stored-payment-methods`) y deja la UI del Drop-in al integrador, que usa [`@adyen/react-native`](https://github.com/Adyen/adyen-react-native) para presentar el checkout.
+
+Mirrors Android `AdyenPayActivity` + iOS `AdyenPaymentVC`.
+
+**Instalación de la librería de UI (opcional, solo si usas Adyen):**
+
+```bash
+npm install @adyen/react-native
+```
+
+**Flujo completo:**
+
+```typescript
+import { MyCashlessSDK } from '@mycashless/react-native-sdk';
+import { AdyenCheckout, AdyenDropIn } from '@adyen/react-native';
+
+const sdk = MyCashlessSDK.getInstance();
+const paymentService = sdk.paymentService;
+
+async function reloadWithAdyen(selectedAmountId: number, quantity: number) {
+  // ── Paso 1: Verificar que Adyen esté habilitado en el evento ──
+  const methods = await paymentService.getAvailablePaymentMethods();
+  if (!methods.adyen) throw new Error('Adyen no disponible en este evento');
+
+  // ── Paso 2: Construir el detalle de recarga ──
+  const reloadDetail = paymentService.buildReloadDetail([
+    { id: selectedAmountId, quantity },
+  ]);
+
+  // ── Paso 3: Crear la sesión en el backend ──
+  const session = await paymentService.createAdyenSession({
+    reloadDetail,
+    receiptEmail: 'user@example.com',
+    returnUrl: 'mycashless://adyen-result',
+    // Opcional:
+    // nfcId: 'abc123',
+    // isDchip: true,
+    // referralCode: 'PROMO',
+  });
+
+  if (!session) throw new Error('No se pudo crear la sesión de Adyen');
+
+  // session.sessionId, session.sessionData, session.clientKey, session.environment
+  // session.merchantReference → se cachea automáticamente para cancelación
+
+  // ── Paso 4: Presentar el Drop-in de Adyen ──
+  // (implementación específica de @adyen/react-native)
+  try {
+    const dropInResult = await AdyenDropIn.startPayment({
+      session: {
+        id: session.sessionId,
+        sessionData: session.sessionData,
+      },
+      clientKey: session.clientKey,
+      environment: session.environment, // 'test' | 'live'
+      returnUrl: 'mycashless://adyen-result',
+    });
+
+    // ── Paso 5: Interpretar el resultado ──
+    const status = paymentService.getAdyenPaymentStatus(dropInResult.resultCode);
+
+    switch (status) {
+      case 'authorised':
+        // Pago exitoso. Sincronizar balance desde el servidor.
+        await sdk.syncNow();
+        await sdk.syncBalanceFromServer();
+        break;
+
+      case 'pending':
+        // Pago pendiente (ej. OXXO, SPEI). Mostrar instrucciones al usuario.
+        break;
+
+      case 'refused':
+        // Pago rechazado. Permitir reintentar con otro método.
+        await paymentService.cancelAdyenSession();
+        break;
+
+      case 'cancelled':
+      case 'error':
+        // Usuario canceló o hubo error. Limpiar sesión.
+        await paymentService.cancelAdyenSession();
+        break;
+    }
+  } catch (error) {
+    // Si el Drop-in falla o el usuario abandona sin resolver, cancela la sesión
+    await paymentService.cancelAdyenSession();
+    throw error;
+  }
+}
+```
+
+**Métodos involucrados:**
+
+| Paso | Método | Servicio |
+|------|--------|----------|
+| 1 | `paymentService.getAvailablePaymentMethods()` | PaymentService |
+| 2 | `paymentService.buildReloadDetail(amounts)` | PaymentService |
+| 3 | `paymentService.createAdyenSession(params)` | PaymentService |
+| 4 | `AdyenDropIn.startPayment(...)` | `@adyen/react-native` |
+| 5 | `paymentService.getAdyenPaymentStatus(code)` | PaymentService |
+| 5a | `sdk.syncNow()` / `sdk.syncBalanceFromServer()` | MyCashlessSDK |
+| 5b | `paymentService.cancelAdyenSession()` | PaymentService |
+
+**Otros métodos Adyen disponibles:**
+
+| Método | Uso |
+|--------|-----|
+| `paymentService.getAdyenClientKey(eventId?)` | Obtener solo `clientKey` + `environment` sin crear sesión |
+| `paymentService.getAdyenStoredPaymentMethods(eventId?)` | Tarjetas guardadas del usuario para one-tap checkout |
+
+**Normalización de `resultCode`:**
+
+| Adyen `resultCode` | `getAdyenPaymentStatus()` |
+|--------------------|---------------------------|
+| `Authorised` | `'authorised'` |
+| `Pending`, `Received` | `'pending'` |
+| `Refused` | `'refused'` |
+| `Cancelled` | `'cancelled'` |
+| (otro) | `'error'` |
+
+> **Importante**: Si el usuario cancela o abandona el Drop-in sin finalizar el pago, **debes llamar `cancelAdyenSession()`** para que el backend libere los transfers reservados. El SDK guarda el `merchantReference` automáticamente al crear la sesión, así que puedes llamar `cancelAdyenSession()` sin argumentos.
+
 ### Flujo 5: Recarga con PayPal
 
 ```typescript
@@ -2078,6 +2202,11 @@ const {
 | `verifyMercadoPagoPayment(externalRef?, maxRetries?)` | Verifica pago de MercadoPago (con reintentos exponenciales) |
 | `getMercadoPagoErrorMessage(statusDetail)` | Mensaje de error legible para un código de MercadoPago |
 | `shouldSuggestDifferentMethod(statusDetail)` | Si el error sugiere usar otro método de pago |
+| `getAdyenClientKey(eventId?)` | Client key + environment de Adyen para el evento |
+| `createAdyenSession(params)` | Crea sesión de Adyen y cachea `merchantReference` para cancelación |
+| `cancelAdyenSession(params?)` | Cancela una sesión de Adyen (usa `merchantReference` cacheado si se omite) |
+| `getAdyenStoredPaymentMethods(eventId?)` | Tarjetas guardadas del usuario para one-tap checkout |
+| `getAdyenPaymentStatus(resultCode)` | Normaliza `resultCode` de Adyen Drop-in a estados estándar |
 | `calculateTotalWithFees(amount)` | Calcula total con comisiones |
 | `buildReloadDetail(amounts)` | Construye string de detalle de recarga |
 | `formatAmount(cents, currency?)` | Formatea centavos a moneda |
