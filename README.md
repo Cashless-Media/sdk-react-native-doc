@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.0.tgz
+npm install ./mycashless-react-native-sdk-1.0.3.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1185,6 +1185,69 @@ function getTypeLabel(type: number): string {
 | `payment_type` | `number` | Tipo de pago (DCHIP, CARD, etc.) |
 | `currency` | `string` | Moneda |
 
+> **Nota sobre `created_time`**: el SDK guarda siempre en formato ISO 8601. El mPOS envía el timestamp como epoch ms en el QR, pero `processScannedQR()` lo normaliza a ISO antes de persistirlo. Si en tu UI necesitas mostrar transacciones importadas de versiones antiguas, envuelve el parseo con `safeDate()`:
+> ```typescript
+> const safeDate = (v?: string) => {
+>   if (!v) return null;
+>   const d = /^\d+$/.test(v) ? new Date(parseInt(v, 10)) : new Date(v);
+>   return isNaN(d.getTime()) ? null : d;
+> };
+> ```
+
+### Flujo 8b: Descargar Recargas Online Pendientes
+
+Cuando un usuario hace una recarga online (Stripe, MercadoPago, PayPal, Adyen) desde otro dispositivo o desde el dashboard, la recarga queda en el backend como un **transfer** esperando a ser aplicada al chip local. `syncOnlineReloads()` descarga esos transfers, los aplica al wallet y devuelve las transacciones canónicas creadas por el backend.
+
+Úsalo cuando el usuario abra la pantalla de wallet para asegurar que vea cualquier recarga reciente sin esperar al sync periódico.
+
+```typescript
+import { MyCashlessSDK } from '@mycashless/react-native-sdk';
+
+const sdk = MyCashlessSDK.getInstance();
+
+async function refreshWallet() {
+  // ── Paso 1: Descargar y aplicar recargas online pendientes ──
+  const result = await sdk.walletService.syncOnlineReloads();
+
+  if (result.error) {
+    console.warn('Error sincronizando recargas:', result.error);
+    return;
+  }
+
+  if (result.synced > 0) {
+    console.log(`${result.synced} recarga(s) aplicada(s)`);
+    // result.transactions contiene las Transaction canónicas del backend
+    // con uid, trans_number, operator_name, etc. reales.
+    result.transactions.forEach(tx => {
+      console.log(`  ${tx.uid}: +$${(tx.balance / 100).toFixed(2)}`);
+    });
+  }
+
+  // ── Paso 2: Recargar historial (ya incluye las nuevas) ──
+  const history = await sdk.walletService.getTransactionHistory();
+}
+```
+
+**Retorno:**
+
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| `synced` | `number` | Cantidad de recargas aplicadas |
+| `transactions` | `Transaction[]` | Transacciones canónicas creadas por el backend |
+| `error` | `string?` | Mensaje de error si falló |
+
+**Métodos involucrados (internos):**
+
+| Paso | Método | Servicio |
+|------|--------|----------|
+| 1 | `walletService.syncOnlineReloads()` | WalletService |
+| 2 | `GET /transfers/balance/active/{eventUid}/all` | Backend |
+| 3 | `POST /transfers/use-balance-by-dchip/all` | Backend |
+| 4 | Persistir `Transaction[]` del response | DatabaseManager |
+| 5 | `chipData.updateByTransaction(tx)` | ChipData |
+
+> **Nota**: Este flujo también se ejecuta automáticamente durante `sdk.syncNow()` y en el sync periódico, pero exponerlo como método público permite forzarlo al abrir una pantalla específica (como la de wallet o historial) sin depender del timer de sync.
+
 ### Flujo 9: Restaurar Sesión al Re-abrir la App
 
 ```typescript
@@ -1976,8 +2039,9 @@ const {
 | `getBalance()` | Obtiene balance actual (balance, promo, tokens) |
 | `getBalanceFormatted()` | Balance con formato (balance, promo, total, tokens) |
 | `getReloadAmounts(eventUid)` | Montos de recarga disponibles |
-| `getTransactionHistory()` | Historial completo de transacciones |
+| `getTransactionHistory()` | Historial completo de transacciones (DB local) |
 | `getRecentTransactions(limit?)` | Últimas N transacciones (default: 10) |
+| `syncOnlineReloads()` | Descarga y aplica recargas online pendientes desde el backend |
 | `createTransaction(params)` | Crea una transacción local |
 | `recordReload(amount, promo?, tokens?)` | Registra una recarga |
 | `redeemPromotion(code)` | Canjea un código promocional |
