@@ -105,6 +105,47 @@ export class AsyncStorageAdapter implements StorageAdapter {
 }
 
 // ============================================
+// Keychain Storage Adapter (sobrevive reinstalación)
+// ============================================
+// Solo se usa para claves críticas (deviceUDID, token, event_id).
+// Requiere: npm install react-native-keychain
+
+import * as Keychain from 'react-native-keychain';
+
+const KEYCHAIN_SERVICE = 'com.mycashless.sdk.secure';
+
+export class KeychainStorageAdapter implements StorageAdapter {
+  async getItem(key: string): Promise<string | null> {
+    try {
+      const result = await Keychain.getGenericPassword({
+        service: `${KEYCHAIN_SERVICE}.${key}`,
+      });
+      return result ? result.password : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async setItem(key: string, value: string): Promise<void> {
+    await Keychain.setGenericPassword(key, value, {
+      service: `${KEYCHAIN_SERVICE}.${key}`,
+      accessible: Keychain.ACCESSIBLE.AFTER_FIRST_UNLOCK,
+    });
+  }
+
+  async removeItem(key: string): Promise<void> {
+    await Keychain.resetGenericPassword({
+      service: `${KEYCHAIN_SERVICE}.${key}`,
+    });
+  }
+
+  async clear(): Promise<void> {
+    // Intencionalmente vacío: las claves en Keychain deben sobrevivir
+    // clearAllData() / logout para preservar la identidad del wallet.
+  }
+}
+
+// ============================================
 // op-sqlite Database Adapter (SQLite)
 // ============================================
 
@@ -187,7 +228,7 @@ Inicializa el SDK una sola vez al arrancar la app. Esto se hace en el componente
 import React, { useEffect, useState } from 'react';
 import { View, ActivityIndicator, Text, StyleSheet } from 'react-native';
 import { MyCashlessSDK } from '@mycashless/react-native-sdk';
-import { AsyncStorageAdapter, OpSqliteDatabaseAdapter } from './src/adapters/StorageAdapters';
+import { AsyncStorageAdapter, KeychainStorageAdapter, OpSqliteDatabaseAdapter } from './src/adapters/StorageAdapters';
 
 function App(): React.JSX.Element {
   const [sdkReady, setSdkReady] = useState(false);
@@ -204,7 +245,8 @@ function App(): React.JSX.Element {
               debug: __DEV__,     // logs en consola solo en desarrollo
             },
             {
-              storage: new AsyncStorageAdapter(),
+              storage: new AsyncStorageAdapter(),          // datos efímeros (config de evento, cache)
+              secureStorage: new KeychainStorageAdapter(),  // datos críticos (deviceUDID, token) — sobrevive reinstalación
               database: new OpSqliteDatabaseAdapter(),
             },
           );
