@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.3.tgz
+npm install ./mycashless-react-native-sdk-1.0.6.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1454,6 +1454,183 @@ async function restoreSession() {
 }
 ```
 
+### Flujo 9b: Restaurar Wallet tras Reinstalación o Cambio de Dispositivo
+
+**Caso de uso:** un usuario de Fanki desinstala el app, lo reinstala o cambia de
+teléfono y quiere recuperar su balance, historial y promociones sin volver a
+pagar. Desde **1.0.6** `walletService.restoreWalletFromBackend()` resuelve esto
+extremo a extremo consultando `personalaccount-api` y dejando la wallet local
+exactamente como estaba.
+
+#### Modelo de identidad del wallet (`dchip_id` estable)
+
+Antes de 1.0.6, el `dchip_id` se derivaba localmente del `device_udid`
+(generado aleatoriamente al instalar el app) concatenado al `event_id`. Si ese
+`device_udid` se perdía, la wallet era irrecuperable aunque el usuario se
+volviera a loguear con la misma cuenta.
+
+Desde 1.0.6, el SDK consulta un endpoint nuevo:
+
+```
+GET /api/v2.0/wallet/id/<event_uid>
+Authorization: Bearer <JWT del usuario>
+
+Response:
+{
+  "dchip_id": "19DBEEA6711B",
+  "full_dchip_id": "000E19DBEEA6711B",
+  "event_id": 14,
+  "user_id": 78950,
+  "is_new": false
+}
+```
+
+La lógica del backend es:
+
+- **Si el usuario ya tiene `dchip_transaction` en ese evento** → devuelve el
+  `dchip_id` histórico (preserva la wallet existente; `is_new: false`).
+- **Si no tiene ninguna** → deriva un `dchip_id` determinístico con
+  `sha1(user_id:event_id:SECRET)[:12]` (`is_new: true`).
+
+Consecuencia: **el mismo `user_id` + `event_id` siempre resuelve al mismo
+`dchip_id`**, independientemente de plataforma, dispositivo, reinstalación o
+migración de cuenta.
+
+#### Diferencia por plataforma
+
+| Escenario | Antes de 1.0.6 | Desde 1.0.6 |
+|---|---|---|
+| **Android — reinstalación del app** | `device_udid` se borraba al desinstalar (salvo con Auto Backup configurado y sincronizado a Google Drive, con delay de hasta 24 h). Wallet se "perdía". | `dchip_id` lo resuelve el backend. Wallet siempre recuperable con `restoreWalletFromBackend()`. |
+| **iOS — reinstalación del app** | `device_udid` sobrevivía al desinstalar solo si el integrador montaba `react-native-keychain` con `ACCESSIBLE_AFTER_FIRST_UNLOCK` + opcionalmente `Keychain Sharing` entitlement. Fallaba si el usuario usaba "Reset All Settings". | Funciona igual que Android: backend resuelve el id. El Keychain local es una cache, ya no la fuente de verdad. |
+| **Cambio de dispositivo** (mismo Apple ID / Google) | Wallet perdida salvo backup+restore del sistema operativo. | Wallet recuperable en cualquier dispositivo con el mismo login. |
+| **Cross-plataforma** (p.ej. Android → iPhone) | Imposible. | Funciona: `user_id` + `event_id` resuelven al mismo `dchip_id`. |
+
+En la práctica, Fanki ya **no necesita configurar** `Keychain Sharing` en iOS ni
+`android:allowBackup="true"` en Android para preservar la identidad del wallet.
+El SDK lo resuelve leyendo el `dchip_id` del backend en cada conexión al evento.
+(El Keychain en iOS y Auto Backup en Android siguen recomendados como cache
+para datos no críticos como el JWT, pero ya no son requisito funcional.)
+
+#### Cómo consumirlo (integración en Fanki)
+
+Hay dos puntos en los que puedes llamar a `restoreWalletFromBackend()`:
+
+**Opción A — botón explícito "Recuperar wallet" en la pantalla de wallet
+(recomendado para producción).** Da control al usuario y transparencia sobre
+cuándo se está trayendo info del backend:
+
+```typescript
+import { MyCashlessSDK } from '@mycashless/react-native-sdk';
+
+const sdk = MyCashlessSDK.getInstance();
+
+async function onRestoreButtonPress() {
+  try {
+    const result = await sdk.walletService.restoreWalletFromBackend();
+
+    if (result.restored) {
+      // Wallet recuperada. `balance` y `promo` vienen en centavos.
+      Alert.alert(
+        'Wallet recuperada',
+        `${result.transactionsCount} transacción(es) restauradas\n` +
+        `Balance: $${(result.balance / 100).toFixed(2)}\n` +
+        `Promo: $${(result.promo / 100).toFixed(2)}`,
+      );
+    } else if (result.error) {
+      // No estaba logueado, no había evento, endpoint caído, 401, etc.
+      Alert.alert('No se pudo recuperar', result.error);
+    } else {
+      // Endpoint respondió OK pero no hay historial — usuario nuevo o primera vez
+      // que abre el wallet en este evento.
+      Alert.alert('Sin historial', 'No encontramos transacciones previas para esta cuenta en este evento.');
+    }
+  } catch (e: any) {
+    Alert.alert('Error', e.message);
+  }
+}
+```
+
+**Opción B — automático post-login en un evento existente.** Si quieres ocultar
+esto al usuario, puedes dispararlo en cuanto `syncEventConnection()` retorne:
+
+```typescript
+async function onLoginComplete() {
+  // ... login exitoso, evento ya conectado ...
+  await sdk.syncEventConnection();
+
+  const balance = sdk.walletService.getBalance();
+  if (balance.balance === 0 && balance.promo === 0) {
+    // Heurística simple: si el wallet local está vacío pero el usuario
+    // ya estaba registrado antes, intenta recuperar del backend.
+    const result = await sdk.walletService.restoreWalletFromBackend();
+    // Opcionalmente notificar al usuario si restored === true.
+  }
+}
+```
+
+No hay riesgo de llamarlo varias veces: las transacciones se deduplican por
+`uid` antes de insertarse en la DB local. Aun así, evita llamarlo en bucle —
+una llamada por sesión es suficiente.
+
+#### Pasos internos (informativo)
+
+Lo que el SDK hace bajo el capó al llamar `restoreWalletFromBackend()`:
+
+1. Lee `eventId`, `eventUid` y `deviceUDID` de `CachedData`.
+2. Llama `GET /api/v2.0/wallet/id/<event_uid>` con el JWT del usuario.
+3. **Short-circuit**: si el backend responde `is_new: true`, retorna
+   `{ restored: false, transactionsCount: 0, balance: 0, promo: 0 }` sin hacer
+   la segunda llamada (no hay historial que restaurar).
+4. Si `is_new: false`, usa el `dchip_id` devuelto para llamar
+   `GET /api/v2.0/wallet/restore/<event_uid>/<dchip_id>`.
+5. Inyecta las transacciones (deduplica por `uid`) en SQLite local.
+6. Actualiza `ChipData` con el `balance` y `promo` autoritativos del backend.
+7. Persiste el `dchip_id` estable en `CachedData[DEVICE_DCHIP_ID]`.
+
+Si el endpoint `/wallet/id` falla (p.ej. 404 porque el backend todavía no está
+actualizado), el SDK hace fallback al `device_udid` local — el flujo sigue
+funcionando como en 1.0.5 para usuarios con el `device_udid` preservado.
+
+#### Prerequisitos
+
+- SDK inicializado (`sdk.initialize(...)`)
+- Usuario autenticado (`authService.login(...)` o sesión restaurada)
+- Evento conectado (`sdk.connectByCode(...)` o `sdk.setEvent(...)`)
+
+Si falta alguno, `restoreWalletFromBackend()` retorna
+`{ restored: false, error: "..." }` con un mensaje descriptivo.
+
+#### Firma
+
+```typescript
+interface RestoreResult {
+  restored: boolean;            // true si se inyectó ≥1 tx en la DB local
+  transactionsCount: number;    // número de tx restauradas (después de dedupe)
+  balance: number;              // balance final en centavos (autoritativo)
+  promo: number;                // promo final en centavos
+  error?: string;               // mensaje descriptivo si algo falló
+}
+
+walletService.restoreWalletFromBackend(proxyEndpoint?: string): Promise<RestoreResult>
+```
+
+El parámetro opcional `proxyEndpoint` permite sobrescribir la ruta del endpoint
+de restore (no la del `/wallet/id`) — útil solo si Fanki monta un proxy interno
+distinto. En condiciones normales se omite.
+
+#### Consulta directa del `dchip_id` estable
+
+Si Fanki necesita el `dchip_id` estable sin disparar el restore completo (p.ej.
+para mostrarlo en UI o loguearlo para soporte), puede llamar directamente:
+
+```typescript
+const identity = await sdk.walletService.fetchStableDchipId();
+// identity = { dchip_id, full_dchip_id, event_id, user_id, is_new } | null
+```
+
+El método persiste el `dchip_id` en `CachedData[StorageKeys.DEVICE_DCHIP_ID]`
+antes de retornar, por lo que pantallas que lo lean ya verán el valor estable.
+
 ### Flujo 10: Canjear Código Promocional
 
 ```typescript
@@ -2208,6 +2385,8 @@ const {
 | `getTransactionHistory()` | Historial completo de transacciones (DB local) |
 | `getRecentTransactions(limit?)` | Últimas N transacciones (default: 10) |
 | `syncOnlineReloads()` | Descarga y aplica recargas online pendientes desde el backend |
+| `restoreWalletFromBackend(proxyEndpoint?)` | Recupera balance y transacciones tras reinstalación o cambio de dispositivo. Usa el `dchip_id` estable del backend (`user_id + event_id`). Ver [Flujo 9b](#flujo-9b-restaurar-wallet-tras-reinstalación-o-cambio-de-dispositivo) |
+| `fetchStableDchipId(eventUid?)` | Obtiene el `dchip_id` estable del backend (`GET /api/v2.0/wallet/id/<event_uid>`) y lo persiste en `CachedData`. Llamada automáticamente por `syncEventConnection()` y `restoreWalletFromBackend()`; expuesto público por si el host lo necesita standalone |
 | `createTransaction(params)` | Crea una transacción local |
 | `recordReload(amount, promo?, tokens?)` | Registra una recarga |
 | `redeemPromotion(code)` | Canjea un código promocional |
