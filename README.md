@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.6.tgz
+npm install ./mycashless-react-native-sdk-1.0.7.tgz
 ```
 
 ### Dependencias Requeridas
@@ -280,6 +280,106 @@ const styles = StyleSheet.create({
   splashText: { marginTop: 16, fontSize: 16 },
 });
 ```
+
+### Paso 2b: Setup específico para Android (solo si usas Adyen Drop-in)
+
+Si vas a procesar pagos con **Adyen Drop-in** (vía `@adyen/react-native`), Android
+requiere dos piezas de configuración nativa que iOS no necesita. Sáltatelo si no
+usas Adyen.
+
+#### 1. Registrar `setLauncherActivity` en `MainActivity`
+
+El Drop-in arranca una `Activity` y necesita un launcher pre-registrado.
+Si lo omites, la primera recarga vía Adyen lanza este error:
+
+```
+Adyen Error
+Launcher not registered. Please call AdyenCheckout.setLauncherActivity()
+on MainActivity.onCreate()
+```
+
+Edita `android/app/src/main/java/<your_package>/MainActivity.kt`:
+
+```kotlin
+package com.tuapp
+
+import android.os.Bundle                              // ← agregar
+import com.adyenreactnativesdk.AdyenCheckout          // ← agregar
+import com.facebook.react.ReactActivity
+import com.facebook.react.ReactActivityDelegate
+import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
+import com.facebook.react.defaults.DefaultReactActivityDelegate
+
+class MainActivity : ReactActivity() {
+
+  override fun getMainComponentName(): String = "TuApp"
+
+  override fun onCreate(savedInstanceState: Bundle?) {  // ← agregar
+    super.onCreate(savedInstanceState)
+    AdyenCheckout.setLauncherActivity(this)
+  }
+
+  override fun createReactActivityDelegate(): ReactActivityDelegate =
+      DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
+}
+```
+
+#### 2. Registrar el HeadlessJsTask para 3D Secure
+
+Si tu evento usa tarjetas con verificación 3D Secure (común en México y la
+mayor parte de Latinoamérica), Android necesita un *HeadlessJsTask* para
+recibir el callback cuando el usuario vuelve del redirect del banco. Sin él,
+verás esta warning y los pagos 3DS no se completarán:
+
+```
+No task registered for key ADYEN_DROPIN_TASK
+```
+
+En tu `index.js` (la entrypoint principal de RN, junto a `AppRegistry.registerComponent`):
+
+```javascript
+import { AppRegistry } from 'react-native';
+import App from './App';
+import { name as appName } from './app.json';
+
+// Required for Adyen Drop-in 3DS redirect handling on Android.
+// The task receives an `action` payload that should be forwarded back
+// to the Adyen component to continue the flow. The simplest pass-through
+// implementation is fine for most cases.
+AppRegistry.registerHeadlessTask(
+  'ADYEN_DROPIN_TASK',
+  () => async (data) => {
+    // The Adyen library handles routing the action back to the active
+    // component; you typically don't need to do anything here.
+    return data;
+  },
+);
+
+AppRegistry.registerComponent(appName, () => App);
+```
+
+#### 3. (Opcional) Auto Backup como fallback secundario
+
+A partir de SDK 1.0.6, la identidad del wallet no depende del `device_udid`
+local, así que **Auto Backup ya no es requerido** para que la wallet
+sobreviva una reinstalación. Aun así, si quieres preservar otros valores
+(token de sesión, preferencias) entre reinstalaciones, puedes activarlo en
+`AndroidManifest.xml`:
+
+```xml
+<application
+  android:allowBackup="true"
+  android:fullBackupContent="@xml/backup_rules"
+  android:dataExtractionRules="@xml/data_extraction_rules"
+  ...>
+```
+
+Con archivos `backup_rules.xml` y `data_extraction_rules.xml` en
+`android/app/src/main/res/xml/` apuntando a `domain="sharedpref"`.
+
+iOS no necesita nada equivalente: el SDK persiste los valores críticos
+en Keychain vía el adaptador `react-native-keychain`, que sobrevive
+reinstalaciones por sí solo.
 
 ### Paso 3: Entorno de Producción vs Desarrollo
 
@@ -1461,6 +1561,17 @@ teléfono y quiere recuperar su balance, historial y promociones sin volver a
 pagar. Desde **1.0.6** `walletService.restoreWalletFromBackend()` resuelve esto
 extremo a extremo consultando `personalaccount-api` y dejando la wallet local
 exactamente como estaba.
+
+> **Nota 1.0.7**: además de la resolución de identidad vía `/wallet/id/`, esta
+> versión garantiza que toda recarga online procesada en el SDK (Adyen, Stripe,
+> MercadoPago, PayPal) **suba al backend tras el éxito del pago**. Antes había
+> caminos en los que la recarga se aplicaba localmente pero nunca llegaba al
+> historial central — entonces el restore tras reinstalación devolvía un wallet
+> incompleto. Desde 1.0.7 el SDK dispara `syncTransactions` automáticamente
+> después de cada `applyReloadLocally` y después de cada consume de
+> `pa_transfer` activo, y alinea el formato del `dchip_id` con el que usan
+> las apps nativas (16 chars con event prefix). El integrador no necesita
+> cambiar su código — solo hacer el upgrade a 1.0.7.
 
 #### Modelo de identidad del wallet (`dchip_id` estable)
 
