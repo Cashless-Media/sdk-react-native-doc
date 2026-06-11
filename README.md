@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.9.tgz
+npm install ./mycashless-react-native-sdk-1.0.10.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1878,6 +1878,57 @@ const identity = await sdk.walletService.fetchStableDchipId();
 El método persiste el `dchip_id` en `CachedData[StorageKeys.DEVICE_DCHIP_ID]`
 antes de retornar, por lo que pantallas que lo lean ya verán el valor estable.
 
+### Flujo 9c: Cambiar de Evento (swipe)
+
+> **Disponible desde 1.0.10.** Si tu app permite cambiar de evento sin reiniciar
+> (p.ej. un swipe entre eventos), usa `switchEvent()` para forzar el refresh
+> completo y evitar fallos de encriptación entre eventos.
+
+Cada evento tiene su **propia llave AES** (`EVENT_OPTION`, derivada del
+`pa_option` del evento) y su propio contexto de wallet (`ChipData`). Si cambias
+de evento sin refrescar esa llave, los QR del nuevo evento fallan al
+desencriptarse (`QRCodeStatus.INVALID_ENCRYPT`) y la config queda desactualizada.
+
+`switchEvent(eventUid)` resuelve esto en una sola llamada:
+
+```typescript
+const sdk = MyCashlessSDK.getInstance();
+
+async function onSwipeToEvent(eventUid: string) {
+  const event = await sdk.switchEvent(eventUid);
+  if (!event) {
+    // No se pudo cambiar de evento (red, uid inválido)
+    return;
+  }
+  // Listo: EVENT_OPTION, config y ChipData ya apuntan al nuevo evento.
+  await updateView(); // refrescar balance/UI
+}
+```
+
+**Qué hace internamente:**
+
+| Paso | Acción | Por qué |
+|------|--------|---------|
+| 1 | `stopPeriodicSync()` | Evita que un sync del evento anterior se mezcle |
+| 2 | Limpia `CHIP_DATA` | Es una llave global por-evento; evita el warning `Invalid decrypted data length` y reconstruye el wallet desde las tx del nuevo evento |
+| 3 | `setEvent(uid)` | Re-descarga el evento y **refresca `EVENT_OPTION` (llave AES) + config + contexto ChipData** |
+| 4 | `syncEventConnection()` (si hay sesión) | Config/balance/`dchip_id` autoritativos; **garantiza** el refresh de la llave desde `pa_option` |
+| 5 | `startSync()` | Reanuda el sync periódico para el nuevo evento |
+
+> **Equivalente manual:** si no quieres usar `switchEvent()`, puedes orquestar
+> los pasos tú mismo: `stopSync()` → `setEvent(uid)` → `syncEventConnection()` →
+> `startSync()`. La regla crítica es **siempre llamar `syncEventConnection()`
+> tras cambiar**, porque es lo que garantiza que la llave AES (`EVENT_OPTION`)
+> quede fresca y evita `INVALID_ENCRYPT` al escanear QRs del nuevo evento.
+
+> **Nota 1.0.10 (robustez offline):** esta versión también corrige un caso en el
+> que un pago **offline** descontaba el wallet pero **no guardaba la fila** en
+> SQLite en dispositivos con una BD creada por un SDK antiguo (esquema sin las
+> columnas nuevas). `DatabaseManager` ahora corre migraciones y **auto-repara el
+> esquema** (`ALTER TABLE ADD COLUMN` de lo que falte) al inicializar, y
+> `processScannedQR()` reporta el fallo en vez de marcar el pago como aplicado.
+> No requiere cambios del integrador — solo actualizar a 1.0.10.
+
 ### Flujo 10: Canjear Código Promocional
 
 ```typescript
@@ -2453,6 +2504,7 @@ Clase principal del SDK. Singleton.
 | `initialize(config, adapters?)` | Inicializa el SDK con configuración y adaptadores |
 | `setEvent(eventUid)` | Configura el evento por UID |
 | `connectByCode(nickname)` | Conecta a un evento por código/nickname |
+| `switchEvent(eventUid)` | Cambia de evento de forma segura (swipe): refresca config + `EVENT_OPTION` (llave AES) + ChipData y re-sincroniza. Evita `INVALID_ENCRYPT` entre eventos. Ver [Flujo 9c](#flujo-9c-cambiar-de-evento-swipe) |
 | `syncEventConnection()` | Sincroniza la conexión del evento con el servidor |
 | `getCurrentEvent()` | Obtiene info del evento actual (id, uid, nombre, moneda, etc.) |
 | `startSync()` | Inicia sincronización periódica (cada 5 min) |
