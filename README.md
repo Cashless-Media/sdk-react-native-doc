@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.7.tgz
+npm install ./mycashless-react-native-sdk-1.0.9.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1164,8 +1164,144 @@ async function handleQRScan(encryptedQRData: string) {
 
 | Método | Servicio | Descripción |
 |--------|----------|-------------|
-| `sdk.processScannedQR(encrypted)` | MyCashlessSDK | Desencripta, valida, aplica tx y sincroniza |
+| `sdk.processScannedQR(encrypted, options?)` | MyCashlessSDK | Desencripta, valida, aplica tx, genera el QR de confirmación y sincroniza |
 | `sdk.syncNow()` | MyCashlessSDK | Se ejecuta automáticamente después del QR |
+
+### Flujo 6b: Cerrar la Venta con el mPOS (QR de confirmación y cancelación)
+
+> **Disponible desde 1.0.9.** Replica exactamente el ciclo de las apps nativas:
+> el operador (mPOS) muestra un QR, el usuario lo escanea, y **el usuario muestra
+> de vuelta un QR de confirmación** que el mPOS escanea para **cerrar la venta**.
+
+Cuando el usuario escanea el QR del mPOS, `processScannedQR()` aplica la
+transacción localmente y devuelve `result.confirmationQR`: un string cifrado,
+**idéntico en formato al de las apps nativas**, que debes renderizar como QR para
+que el operador lo escanee y cierre la venta.
+
+#### Casos 1-2: verde (online) vs amarillo (offline)
+
+El segundo argumento `options.onUploaded` te avisa si la transacción **subió al
+backend**. Esto reproduce las dos pantallas nativas:
+
+- **Verde** (`onUploaded(true)`): la subida tuvo éxito → el mPOS del operador
+  cierra la venta automáticamente por socket. Muestra la pantalla de éxito.
+- **Amarillo** (`onUploaded(false)` o aún `pending`): sin conexión o falló la
+  subida → el operador debe **escanear el `confirmationQR`** para cerrar la venta.
+
+El `confirmationQR` es **el mismo** en ambos casos; solo cambia la pantalla.
+
+```tsx
+import { MyCashlessSDK, QRCodeStatus } from '@mycashless/react-native-sdk';
+import type { ProcessQRResult } from '@mycashless/react-native-sdk';
+
+async function handleQRScanned(data: string) {
+  const sdk = MyCashlessSDK.getInstance();
+
+  // 'pending' = amarillo, 'ok' = verde, 'fail' = amarillo (offline/falló)
+  setUploadState('pending');
+
+  const result: ProcessQRResult = await sdk.processScannedQR(data, {
+    onUploaded: (uploaded) => {
+      // Se dispara cuando la subida de ESTA transacción resuelve.
+      setUploadState(uploaded ? 'ok' : 'fail');
+    },
+  });
+
+  if (result.status === QRCodeStatus.VALID && result.confirmationQR) {
+    // Renderiza result.confirmationQR como QR (ver Flujo 7b) y muéstralo
+    // de inmediato — funciona aunque estés offline. La pantalla arranca en
+    // amarillo y pasa a verde cuando onUploaded(true) llega.
+    showConfirmationScreen(result.confirmationQR);
+    await updateView(); // refrescar balance
+  } else {
+    // QR inválido / saldo insuficiente / duplicado, etc.
+    Alert.alert('Scan Failed', result.message);
+  }
+}
+```
+
+> El QR se muestra **inmediatamente** (no bloquea en la red). `onUploaded` llega
+> después; por eso la pantalla empieza en amarillo y, si hay internet, pasa a
+> verde sola.
+
+#### Caso 4: re-mostrar el QR si el operador no alcanzó a escanearlo
+
+Desde la pantalla de transacciones, el usuario puede volver a mostrar el QR de
+una transacción para cerrarla más tarde. El mPOS es **idempotente**: escanear una
+venta ya cerrada es un no-op (detecta duplicado por `group_uid`).
+
+```typescript
+const qr = await sdk.getTransactionQRByUid(uid);
+if (qr) showQrModal(qr); // renderiza y muestra al operador
+```
+
+#### Caso 3: cancelar una transacción (el dinero vuelve al wallet)
+
+El usuario muestra al operador el QR de la transacción, se escanean mutuamente, y
+al confirmar, `cancelTransaction()` **revierte el saldo** (el dinero vuelve al
+wallet), marca la transacción como `CANCELED` y sube el cambio para que el mPOS
+también la cancele. Restringido a `BALANCE`, `SALE` y `TIP` (igual que el ícono
+de basura en las apps nativas).
+
+```typescript
+// 1) Mostrar al operador el QR de la transacción a cancelar.
+const qr = await sdk.getTransactionQRByUid(uid);
+showQrModal(qr);
+
+// 2) Tras el escaneo mutuo / confirmación, finalizar la cancelación.
+const res = await sdk.cancelTransaction(uid);
+if (res.success) {
+  // res.newBalance ya refleja el dinero devuelto al wallet.
+  console.log('Cancelada. Nuevo balance:', (res.newBalance!.balance / 100).toFixed(2));
+  await reloadTransactions();
+} else {
+  Alert.alert('No se pudo cancelar', res.message);
+}
+```
+
+> `cancelTransaction()` **espera** a que la subida termine antes de retornar, por
+> lo que al recargar la lista la fila ya aparece sincronizada (sin "Pending
+> sync"). Si estás offline, la fila queda legítimamente pendiente y el sync
+> periódico la reintenta.
+
+#### Tipos
+
+```typescript
+interface ProcessQROptions {
+  // Se dispara cuando la subida de la transacción recién procesada resuelve.
+  // true → verde (el operador auto-cierra por socket); false → amarillo
+  // (offline/falló → el operador escanea el confirmationQR).
+  onUploaded?: (uploaded: boolean) => void;
+}
+
+interface ProcessQRResult {
+  status: number;            // QRCodeStatus
+  message: string;
+  transactionType?: number;
+  amount?: number;           // centavos
+  promoAmount?: number;      // centavos
+  transaction?: Transaction;
+  newBalance?: WalletBalance;
+  confirmationQR?: string;   // QR a mostrar al mPOS (solo cuando status = VALID)
+  parsedData?: ParsedTransactionQR;
+}
+
+interface CancelTransactionResult {
+  success: boolean;
+  message: string;
+  transaction?: Transaction;  // con status = CANCELED
+  newBalance?: WalletBalance; // tras devolver el dinero al wallet
+}
+```
+
+**Métodos involucrados:**
+
+| Método | Servicio | Descripción |
+|--------|----------|-------------|
+| `sdk.processScannedQR(encrypted, { onUploaded })` | MyCashlessSDK | Aplica la tx y devuelve `confirmationQR`; `onUploaded` → verde/amarillo |
+| `sdk.getTransactionQRByUid(uid)` | MyCashlessSDK | Re-genera el QR de una tx guardada (re-mostrar o iniciar cancelación) |
+| `sdk.generateConfirmationQR(tx)` | MyCashlessSDK | Igual que el anterior pero a partir de un objeto `Transaction` |
+| `sdk.cancelTransaction(uid)` | MyCashlessSDK | Revierte el saldo, marca `CANCELED` y sube el cambio (esperado) |
 
 ### Flujo 7: Generar QR del Dispositivo
 
@@ -1451,7 +1587,7 @@ function getTypeLabel(type: number): string {
 | `payment_type` | `number` | Tipo de pago (DCHIP, CARD, etc.) |
 | `currency` | `string` | Moneda |
 
-> **Nota sobre `created_time`**: el SDK guarda siempre en formato ISO 8601. El mPOS envía el timestamp como epoch ms en el QR, pero `processScannedQR()` lo normaliza a ISO antes de persistirlo. Si en tu UI necesitas mostrar transacciones importadas de versiones antiguas, envuelve el parseo con `safeDate()`:
+> **Nota sobre `created_time`**: el SDK guarda siempre en formato ISO 8601. Desde **1.0.9**, `processScannedQR()` sella la transacción con la **hora actual del dispositivo** al procesar el QR (paridad con las apps nativas iOS/Android), no con el timestamp embebido en el QR del mPOS. Si en tu UI necesitas mostrar transacciones importadas de versiones antiguas (que usaban el epoch del QR), envuelve el parseo con `safeDate()`:
 > ```typescript
 > const safeDate = (v?: string) => {
 >   if (!v) return null;
@@ -1988,23 +2124,31 @@ import type { ProcessQRResult } from '@mycashless/react-native-sdk';
 // Cuando la cámara detecta un QR:
 const handleQRScanned = async (data: string) => {
   const sdk = MyCashlessSDK.getInstance();
-  const result: ProcessQRResult = await sdk.processScannedQR(data);
+
+  // onUploaded → verde (subió) / amarillo (offline). Ver Flujo 6b.
+  const result: ProcessQRResult = await sdk.processScannedQR(data, {
+    onUploaded: (uploaded) => setUploadState(uploaded ? 'ok' : 'fail'),
+  });
 
   if (result.status === QRCodeStatus.VALID) {
-    // Transacción procesada exitosamente
-    Alert.alert(
-      'QR Processed',
-      `${result.message}\n` +
-      `Amount: $${((result.amount || 0) / 100).toFixed(2)}\n` +
-      `New Balance: $${((result.newBalance?.balance || 0) / 100).toFixed(2)}`,
-    );
     await updateView(); // Refrescar UI con nuevo balance
+
+    if (result.confirmationQR) {
+      // Mostrar el QR de confirmación para que el mPOS cierre la venta.
+      // Arranca en amarillo; pasa a verde cuando onUploaded(true) llega.
+      showConfirmationScreen(result.confirmationQR); // ver Flujo 7b para renderizar
+    }
   } else {
     // Mostrar error con detalle de diagnóstico
     Alert.alert('Scan Failed', result.message);
   }
 };
 ```
+
+> En la pantalla de transacciones, agrega un botón **"Show QR"**
+> (`getTransactionQRByUid(uid)`) para re-mostrar el QR y un botón **"Cancel"**
+> (`cancelTransaction(uid)`) para devolver el dinero al wallet. Ver
+> [Flujo 6b](#flujo-6b-cerrar-la-venta-con-el-mpos-qr-de-confirmación-y-cancelación).
 
 ### Pantalla de Transacciones (TransactionsScreen)
 
@@ -2316,7 +2460,10 @@ Clase principal del SDK. Singleton.
 | `syncNow()` | Ejecuta sincronización inmediata — retorna `SyncResult` |
 | `syncBalanceFromServer()` | Intenta sincronizar balance desde el servidor |
 | `applyReloadLocally(balanceCents, promoCents?)` | Aplica una recarga localmente al wallet |
-| `processScannedQR(encryptedQR)` | Procesa un QR escaneado — retorna `ProcessQRResult` |
+| `processScannedQR(encryptedQR, options?)` | Procesa un QR escaneado — retorna `ProcessQRResult` (incluye `confirmationQR`). `options.onUploaded` indica verde/amarillo. Ver [Flujo 6b](#flujo-6b-cerrar-la-venta-con-el-mpos-qr-de-confirmación-y-cancelación) |
+| `generateConfirmationQR(transaction)` | Genera el QR de confirmación (cierre de venta) a partir de un `Transaction` |
+| `getTransactionQRByUid(uid)` | Re-genera el QR de una transacción guardada (re-mostrar / iniciar cancelación) |
+| `cancelTransaction(uid)` | Cancela una tx (BALANCE/SALE/TIP): revierte el saldo, marca `CANCELED` y sube el cambio — retorna `CancelTransactionResult` |
 | `isInitialized()` | Verifica si el SDK está inicializado |
 | `isEventSet()` | Verifica si hay un evento configurado |
 | `getConfig()` | Obtiene la configuración actual |
