@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.11.tgz
+npm install ./mycashless-react-native-sdk-1.0.12.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1243,19 +1243,29 @@ wallet), marca la transacción como `CANCELED` y sube el cambio para que el mPOS
 también la cancele. Restringido a `BALANCE`, `SALE` y `TIP` (igual que el ícono
 de basura en las apps nativas).
 
+> **Seguridad (1.0.12):** pasá `{ confirmQR }` con el QR que el operador mostró de
+> vuelta. El SDK lo **descifra sin aplicarlo** y verifica que su `transactionUid`
+> coincida con el `uid` que querés cancelar — así un QR ajeno **no puede** disparar
+> una cancelación. ⚠️ **No uses `processScannedQR` para esto**: ese método
+> **aplica/debita** la transacción del QR. Para solo inspeccionar un QR escaneado,
+> usá `parseScannedQR()`.
+
 ```typescript
 // 1) Mostrar al operador el QR de la transacción a cancelar.
 const qr = await sdk.getTransactionQRByUid(uid);
 showQrModal(qr);
 
-// 2) Tras el escaneo mutuo / confirmación, finalizar la cancelación.
-const res = await sdk.cancelTransaction(uid);
-if (res.success) {
-  // res.newBalance ya refleja el dinero devuelto al wallet.
-  console.log('Cancelada. Nuevo balance:', (res.newBalance!.balance / 100).toFixed(2));
-  await reloadTransactions();
-} else {
-  Alert.alert('No se pudo cancelar', res.message);
+// 2) Escanear el QR que muestra el operador y cancelar SOLO si coincide.
+async function onConfirmScanned(scannedQR: string) {
+  const res = await sdk.cancelTransaction(uid, { confirmQR: scannedQR });
+  if (res.success) {
+    // res.newBalance ya refleja el dinero devuelto al wallet.
+    console.log('Cancelada. Nuevo balance:', (res.newBalance!.balance / 100).toFixed(2));
+    await reloadTransactions();
+  } else {
+    // p.ej. "El QR escaneado no corresponde a esta transacción"
+    Alert.alert('No se pudo cancelar', res.message);
+  }
 }
 ```
 
@@ -1263,6 +1273,17 @@ if (res.success) {
 > lo que al recargar la lista la fila ya aparece sincronizada (sin "Pending
 > sync"). Si estás offline, la fila queda legítimamente pendiente y el sync
 > periódico la reintenta.
+
+#### `parseScannedQR()` — inspeccionar un QR sin aplicarlo
+
+```typescript
+// Devuelve { status, parsedData } SIN tocar wallet/DB/sync.
+const r = await sdk.parseScannedQR(scannedQR);
+if (r.status === QRCodeStatus.VALID) {
+  console.log('uid del QR:', r.parsedData?.transactionUid);
+  console.log('monto:', (r.parsedData?.balance ?? 0) / 100);
+}
+```
 
 #### Tipos
 
@@ -1299,9 +1320,10 @@ interface CancelTransactionResult {
 | Método | Servicio | Descripción |
 |--------|----------|-------------|
 | `sdk.processScannedQR(encrypted, { onUploaded })` | MyCashlessSDK | Aplica la tx y devuelve `confirmationQR`; `onUploaded` → verde/amarillo |
+| `sdk.parseScannedQR(encrypted)` | MyCashlessSDK | Parsea un QR **sin aplicarlo** (no toca wallet/DB) — devuelve `parsedData` |
 | `sdk.getTransactionQRByUid(uid)` | MyCashlessSDK | Re-genera el QR de una tx guardada (re-mostrar o iniciar cancelación) |
 | `sdk.generateConfirmationQR(tx)` | MyCashlessSDK | Igual que el anterior pero a partir de un objeto `Transaction` |
-| `sdk.cancelTransaction(uid)` | MyCashlessSDK | Revierte el saldo, marca `CANCELED` y sube el cambio (esperado) |
+| `sdk.cancelTransaction(uid, { confirmQR? })` | MyCashlessSDK | Revierte el saldo, marca `CANCELED` y sube el cambio. Con `confirmQR` valida que el QR escaneado coincida con `uid` antes de cancelar |
 
 ### Flujo 7: Generar QR del Dispositivo
 
@@ -2514,9 +2536,10 @@ Clase principal del SDK. Singleton.
 | `syncBalanceFromServer()` | Intenta sincronizar balance desde el servidor |
 | `applyReloadLocally(balanceCents, promoCents?)` | Aplica una recarga localmente al wallet |
 | `processScannedQR(encryptedQR, options?)` | Procesa un QR escaneado — retorna `ProcessQRResult` (incluye `confirmationQR`). `options.onUploaded` indica verde/amarillo. Ver [Flujo 6b](#flujo-6b-cerrar-la-venta-con-el-mpos-qr-de-confirmación-y-cancelación) |
+| `parseScannedQR(encryptedQR)` | Parsea un QR **sin aplicarlo** (no toca wallet/DB/sync) — retorna `ProcessQRResult` con `parsedData`. Para inspeccionar/validar un QR escaneado |
 | `generateConfirmationQR(transaction)` | Genera el QR de confirmación (cierre de venta) a partir de un `Transaction` |
 | `getTransactionQRByUid(uid)` | Re-genera el QR de una transacción guardada (re-mostrar / iniciar cancelación) |
-| `cancelTransaction(uid)` | Cancela una tx (BALANCE/SALE/TIP): revierte el saldo, marca `CANCELED` y sube el cambio — retorna `CancelTransactionResult` |
+| `cancelTransaction(uid, options?)` | Cancela una tx (BALANCE/SALE/TIP): revierte el saldo, marca `CANCELED` y sube el cambio. `options.confirmQR` valida que el QR escaneado coincida con `uid` antes de cancelar — retorna `CancelTransactionResult` |
 | `isInitialized()` | Verifica si el SDK está inicializado |
 | `isEventSet()` | Verifica si hay un evento configurado |
 | `getConfig()` | Obtiene la configuración actual |
