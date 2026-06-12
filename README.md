@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.10.tgz
+npm install ./mycashless-react-native-sdk-1.0.11.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1910,10 +1910,11 @@ async function onSwipeToEvent(eventUid: string) {
 | Paso | Acción | Por qué |
 |------|--------|---------|
 | 1 | `stopPeriodicSync()` | Evita que un sync del evento anterior se mezcle |
-| 2 | Limpia `CHIP_DATA` | Es una llave global por-evento; evita el warning `Invalid decrypted data length` y reconstruye el wallet desde las tx del nuevo evento |
-| 3 | `setEvent(uid)` | Re-descarga el evento y **refresca `EVENT_OPTION` (llave AES) + config + contexto ChipData** |
-| 4 | `syncEventConnection()` (si hay sesión) | Config/balance/`dchip_id` autoritativos; **garantiza** el refresh de la llave desde `pa_option` |
-| 5 | `startSync()` | Reanuda el sync periódico para el nuevo evento |
+| 2 | `setEvent(uid)` | Re-descarga el evento y **refresca `EVENT_OPTION` (llave AES) + config + contexto ChipData**. Reconstruye el wallet desde las tx del nuevo evento |
+| 3 | `syncEventConnection()` (si hay sesión) | Config/balance/`dchip_id` autoritativos; **garantiza** el refresh de la llave desde `pa_option` |
+| 4 | `startSync()` | Reanuda el sync periódico para el nuevo evento |
+
+> **Nota 1.0.11:** versiones previas borraban `CHIP_DATA` aquí (para silenciar un warning cosmético), pero eso **borraba un balance ya restaurado** en el wallet. Desde 1.0.11 `switchEvent` **no** borra `CHIP_DATA` — `setEvent` ya reconstruye el wallet de forma segura.
 
 > **Equivalente manual:** si no quieres usar `switchEvent()`, puedes orquestar
 > los pasos tú mismo: `stopSync()` → `setEvent(uid)` → `syncEventConnection()` →
