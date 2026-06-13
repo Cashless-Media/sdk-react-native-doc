@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.12.tgz
+npm install ./mycashless-react-native-sdk-1.0.13.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1875,8 +1875,13 @@ Si falta alguno, `restoreWalletFromBackend()` retorna
 interface RestoreResult {
   restored: boolean;            // true si se inyectó ≥1 tx en la DB local
   transactionsCount: number;    // número de tx restauradas (después de dedupe)
-  balance: number;              // balance final en centavos (autoritativo)
+  balance: number;              // balance final en centavos (autoritativo, ≥0)
   promo: number;                // promo final en centavos
+  incomplete?: boolean;         // (1.0.11) true si el backend devolvió balance < 0:
+                                //   el restore quedó INCOMPLETO (faltan recargas del
+                                //   usuario bajo otros dchip_id — el backend debe agregar
+                                //   por user_id). Revisalo para detectar estos casos.
+  rawBalance?: number;          // (1.0.11) balance sin clampear, para diagnóstico
   error?: string;               // mensaje descriptivo si algo falló
 }
 
