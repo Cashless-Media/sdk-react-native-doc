@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.14.tgz
+npm install ./mycashless-react-native-sdk-1.0.15.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1273,6 +1273,17 @@ async function onConfirmScanned(scannedQR: string) {
 > lo que al recargar la lista la fila ya aparece sincronizada (sin "Pending
 > sync"). Si estás offline, la fila queda legítimamente pendiente y el sync
 > periódico la reintenta.
+
+> **Fix importante (1.0.15) — cancelaciones que seguían descontando.** Hasta
+> 1.0.14, al cancelar una venta el SDK marcaba la transacción con un valor de
+> `status` interno (7) que **el backend no reconoce como cancelado** (espera 3).
+> Resultado: la venta cancelada seguía contándose contra el saldo (p.ej. 100 −
+> pago 5 → 95, y al cancelar quedaba 90 en vez de volver a 95). Desde 1.0.15 la
+> cancelación se guarda con el `status` correcto del backend, así que tanto el
+> backend como la reconstrucción local **la excluyen** y el saldo vuelve bien.
+> Es un fix **hacia adelante**: las filas ya guardadas con el status viejo deben
+> corregirse del lado del backend. No requiere cambios del integrador — solo
+> actualizar a 1.0.15.
 
 #### `parseScannedQR()` — inspeccionar un QR sin aplicarlo
 
