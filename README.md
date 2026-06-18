@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.13.tgz
+npm install ./mycashless-react-native-sdk-1.0.14.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1859,6 +1859,20 @@ Lo que el SDK hace bajo el capó al llamar `restoreWalletFromBackend()`:
 Si el endpoint `/wallet/id` falla (p.ej. 404 porque el backend todavía no está
 actualizado), el SDK hace fallback al `device_udid` local — el flujo sigue
 funcionando como en 1.0.5 para usuarios con el `device_udid` preservado.
+
+> **Fix importante (1.0.14) — saldo inflado al actualizar la app.** En versiones
+> anteriores, al reconstruir el wallet desde la BD local (`ChipData.restoreFromDB`,
+> que corre al conectar el evento / reabrir la app) el balance podía quedar
+> **inflado** (en casos extremos ×2). La reconstrucción comparaba el `status` de
+> cada transacción contra un enum interno equivocado, por lo que contaba
+> transacciones **canceladas/incompletas** y erraba la dirección de
+> **transferencias/depósitos**. Desde 1.0.14 la reconstrucción replica
+> **exactamente** la fórmula de balance del backend (`reload = topup + (transfer_in
+> − transfer_out) + recycled − refund`; `sale = ventas + tips + deposit +
+> sell_tickets`; `balance = reload − sale − donation`), excluyendo solo los
+> estados que el backend excluye. El balance reconstruido ahora **siempre cuadra
+> con el backend** y un wallet que ya quedó inflado se **auto-corrige** al
+> reconectar. No requiere cambios del integrador — solo actualizar a 1.0.14.
 
 #### Prerequisitos
 
