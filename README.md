@@ -33,7 +33,7 @@ yarn add @mycashless/react-native-sdk
 Si recibiste el SDK como archivo `.tgz`, instálalo directamente:
 
 ```bash
-npm install ./mycashless-react-native-sdk-1.0.15.tgz
+npm install ./mycashless-react-native-sdk-1.0.16.tgz
 ```
 
 ### Dependencias Requeridas
@@ -1274,16 +1274,22 @@ async function onConfirmScanned(scannedQR: string) {
 > sync"). Si estás offline, la fila queda legítimamente pendiente y el sync
 > periódico la reintenta.
 
-> **Fix importante (1.0.15) — cancelaciones que seguían descontando.** Hasta
-> 1.0.14, al cancelar una venta el SDK marcaba la transacción con un valor de
-> `status` interno (7) que **el backend no reconoce como cancelado** (espera 3).
-> Resultado: la venta cancelada seguía contándose contra el saldo (p.ej. 100 −
-> pago 5 → 95, y al cancelar quedaba 90 en vez de volver a 95). Desde 1.0.15 la
-> cancelación se guarda con el `status` correcto del backend, así que tanto el
-> backend como la reconstrucción local **la excluyen** y el saldo vuelve bien.
-> Es un fix **hacia adelante**: las filas ya guardadas con el status viejo deben
-> corregirse del lado del backend. No requiere cambios del integrador — solo
-> actualizar a 1.0.15.
+> **Fix importante (1.0.16) — paridad nativa en el saldo (valores de `status`).**
+> El SDK reconstruye el saldo del dChip usando los valores de `status` que
+> realmente escriben las apps nativas y que viven en `dchip_transaction.status`:
+> `CREATED=1, CANCELED=7, REMOVED=9, ADDED=10, INCOMPLETE=11, INCIDENT=12`.
+> Reglas (idénticas a `ChipData.restoreDB` nativo): se excluye del saldo **solo
+> lo cancelado (status 7)**; las transferencias/depósitos suman si `ADDED(10)` y
+> restan si `REMOVED(9)` o `CREATED(1)`. Las versiones 1.0.14/1.0.15 se habían
+> anclado al convenio del backend antiguo (`CANCELED=3, ADDED=1, REMOVED=2`), que
+> **no coincide con la data** — contaba ventas canceladas e ignoraba/invertía
+> transferencias. Una cancelación (`cancelTransaction`) se guarda con status **7**.
+> No requiere cambios del integrador — solo actualizar a 1.0.16.
+>
+> ⚠️ **Requiere el backend alineado:** el endpoint `/wallet/restore`
+> (`personalaccount-api wallet.py`) debe usar el mismo convenio de `status`
+> (excluir solo 7; transfer/deposit por 10/9/1). Sin ese deploy, el saldo que
+> reporta el backend puede diferir del que computa el SDK localmente.
 
 #### `parseScannedQR()` — inspeccionar un QR sin aplicarlo
 
